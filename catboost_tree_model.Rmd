@@ -1,0 +1,423 @@
+---
+title: "Gradient boost tree model with catboost"
+output: html_notebook
+---
+
+load requied package
+```{r load requied package}
+pacman::p_load(tidyr, dplyr, ggplot2, catboost, caret, plotROC, tensorflow)
+```
+
+set working directory
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# knitr::opts_knit$set(root.dir = "C:/Users/cshen/Documents/Dataset")
+knitr::opts_knit$set(root.dir = "C:/Users/Shenc/Documents/NUS EBAC/EBA5005/CA/Dataset")
+getwd()
+```
+
+load required data
+```{r import dataset}
+train_over <- read.csv("train_over.csv")
+train_under <- read.csv("train_under.csv")
+train_both <- read.csv("train_both.csv")
+train_rose <- read.csv("train_rose.csv")
+test <- read.csv("test.csv")
+train0 <- read.csv("train0.csv")
+```
+
+custom function
+```{r}
+# compute model accuracy
+calc_accuracy <- function(prediction, expected, threshold) {
+  labels <- ifelse(prediction > threshold, 1, 0)
+  accuracy <- sum(labels == expected) / length(labels)
+  return(accuracy)
+}
+
+```
+
+remove first column
+```{r}
+train_over <- train_over[,c(-1)]
+train_under <- train_under[,c(-1)]
+train_both <- train_both[,c(-1)]
+train_rose <- train_rose[,c(-1)]
+test <- test[,c(-1)]
+train0 <- train0[,c(-1)]
+```
+
+generate cat pool
+```{r}
+column_description_vector <-  colnames(train_over)
+target <- 12
+
+train_over_pool <- catboost.load_pool(data=train_over[,-target], label = train_over[,target])
+test_pool <- catboost.load_pool(data=test[,-target], label = test[,target])
+```
+
+train model - initial iter
+```{r}
+path <- c("C:/Users/Shenc/Documents/NUS EBAC/EBA5005/CA/Model")
+
+fit_params <- list(task_type="GPU",
+                   loss_function = "Logloss",
+                   iterations = 150,
+                   learning_rate = 0.3,
+                   random_seed = 101,
+                   l2_leaf_reg = 5,
+                   bagging_temperature = 3, 
+                   #sampling_frequency = "PerTree",
+                   #ignored_features = c(4,9),
+                   border_count = 32,
+                   depth = 3,
+                   leaf_estimation_method = "Newton",
+                   feature_border_type = "GreedyLogSum",
+                   thread_count = 500,
+                   logging_level = 'Silent',
+                   train_dir = path,
+                   od_type = "Iter")
+
+model_over <- catboost.train(train_over_pool, test_pool, fit_params)
+
+#tensorboard(log_dir = path)
+```
+
+grid search
+```{r}
+
+# drop_columns <- "hospital_death"
+# x <- train_under[,!(names(train_over) %in% drop_columns)]
+# y <- train_under[,c("hospital_death")]
+# 
+# fit_control <- trainControl(method = "cv",
+#                             number = 5,
+#                             classProbs = TRUE)
+# 
+# #seq(0.01,0.1, by=0.01)
+# #seq(100,1000, by = 50)
+# 
+# # set grid options
+# grid <- expand.grid(
+#   depth = (3:7),
+#   learning_rate = 0.04,
+#   iterations = 150,
+#   l2_leaf_reg = 4,
+#   rsm = 0.95,
+#   border_count = 32
+# )
+# 
+# model <- caret::train(x, as.factor(make.names(y)),
+#                 method = catboost.caret,
+#                 logging_level = 'Silent', preProc = NULL,
+#                 tuneGrid = grid, trControl = fit_control)
+# 
+# print(model)
+# 
+# importance <- varImp(model, scale = FALSE)
+# print(importance)
+```
+
+
+Predict and evaluate
+```{r}
+prediction <- catboost.predict(model_over, test_pool, prediction_type = 'Probability')
+# cat("Sample predictions: ", sample(prediction, 5), "\n")
+```
+
+confusion matrix
+```{r}
+# test set confusion matrix
+test_matrix <- catboost.predict(model_over, test_pool, prediction_type = 'Class')
+table(test[,target], test_matrix)
+
+# train set confusion matrix
+train_matrix <- catboost.predict(model_over, train_over_pool, prediction_type = 'Class')
+table(train_over[,target], train_matrix)
+
+# works properly only for Logloss
+accuracy <- calc_accuracy(prediction, test[,target], 0.493472)
+cat("\nAccuracy: ", accuracy, "\n")
+```
+
+ROC and AUC
+```{r warning=FALSE}
+roc_obj <- pROC::roc(test$hospital_death, prediction)
+plot(roc_obj)
+pROC::auc(roc_obj)
+
+pROC::coords(roc_obj, "best", "threshold")
+```
+
+feature importance
+```{r}
+# cat("\nFeature importances", "\n")
+feature_imp <- catboost.get_feature_importance(model_over, train_over_pool)
+feature_df <- data.frame(columnNameILike = row.names(feature_imp), feature_imp)
+colnames(feature_df) <- c("feature", "importance")
+
+# find features with 0 importance
+least_imp <- feature_df %>%
+  filter(importance == 0) %>%
+  select(feature)
+```
+
+remove features with importance = 0
+```{r eval=FALSE, include=FALSE}
+# # create a matrix of feature names
+# var <- as.matrix(least_imp)
+# 
+# # copy train_over to a new df
+# train_over_new <- train_over
+# test_over_new <- test
+# 
+# # loop to remove 0 importance features
+# for (i in var){
+# 
+#   train_over_new[[i]] <- NULL
+#   test_over_new[[i]] <- NULL
+#   
+# }
+```
+
+
+prepare cat pool for under sampling dataset
+```{r}
+# parameters tuning
+fit_params1 <- list(task_type="GPU",
+                   loss_function = "Logloss",
+                   iterations = 150,
+                   learning_rate = 0.04,
+                   random_seed = 101,
+                   l2_leaf_reg = 3,
+                   bagging_temperature = 3, 
+                   #sampling_frequency = "PerTree",
+                   #ignored_features = c(4,9),
+                   border_count = 32,
+                   depth = 2,
+                   leaf_estimation_method = "Newton",
+                   feature_border_type = "MinEntropy",
+                   thread_count = 100,
+                   logging_level = 'Silent',
+                   train_dir = path,
+                   od_type = "Iter")
+
+# split train and test sets
+train_under_pool <- catboost.load_pool(data=train_under[,-target], label = train_under[,target])
+model_under <- catboost.train(train_under_pool, test_pool, fit_params1)
+prediction_under <- catboost.predict(model_under, test_pool, prediction_type = 'Probability')
+
+# test set confusion matrix
+test_matrix_under <- catboost.predict(model_under, test_pool, prediction_type = 'Class')
+table(test[,target], test_matrix_under)
+
+# train set confusion matrix
+train_matrix_under <- catboost.predict(model_under, train_under_pool, prediction_type = 'Class')
+table(train_under[,target], train_matrix_under)
+
+# compute accuracy
+accuracy_under <- calc_accuracy(prediction_under, test[,target], 0.462345)
+cat("\nAccuracy: ", accuracy_under, "\n")
+
+# feature importance
+feature_imp1 <- catboost.get_feature_importance(model_under, train_under_pool)
+feature_df1 <- data.frame(columnNameILike = row.names(feature_imp1), feature_imp1)
+colnames(feature_df1) <- c("feature", "importance")
+
+# identify and remove 0 importance features
+least_imp1 <- feature_df1 %>%
+  filter(importance == 0) %>%
+  select(feature) 
+
+# model threshold
+roc_obj1 <- pROC::roc(test$hospital_death, prediction_under)
+plot(roc_obj1)
+pROC::auc(roc_obj1)
+
+pROC::coords(roc_obj1, "best", "threshold")
+```
+
+prepare cat pool for over and under sampling dataset
+```{r}
+# parameters tuning
+fit_params2 <- list(task_type="GPU",
+                   loss_function = "Logloss",
+                   iterations = 150,
+                   learning_rate = 0.04,
+                   random_seed = 101,
+                   l2_leaf_reg = 1,
+                   bagging_temperature = 1, 
+                   #sampling_frequency = "PerTree",
+                   #ignored_features = c(4,9),
+                   border_count = 32,
+                   depth = 7,
+                   leaf_estimation_method = "Newton",
+                   feature_border_type = "MinEntropy",
+                   thread_count = 100,
+                   logging_level = 'Silent',
+                   train_dir = path,
+                   od_type = "Iter")
+
+# split train and test sets
+train_both_pool <- catboost.load_pool(data=train_both[,-target], label = train_both[,target])
+model_both <- catboost.train(train_both_pool, test_pool, fit_params2)
+prediction_both <- catboost.predict(model_both, test_pool, prediction_type = 'Probability')
+
+# test set confusion matrix
+test_matrix_both <- catboost.predict(model_both, test_pool, prediction_type = 'Class')
+table(test[,target], test_matrix_both)
+
+# train set confusion matrix
+train_matrix_both <- catboost.predict(model_both, train_both_pool, prediction_type = 'Class')
+table(train_both[,target], train_matrix_both)
+
+# compute accuracy
+accuracy_both <- calc_accuracy(prediction_both, test[,target], 0.488152)
+cat("\nAccuracy: ", accuracy_both, "\n")
+
+# feature importance
+feature_imp2 <- catboost.get_feature_importance(model_both, train_both_pool)
+feature_df2 <- data.frame(columnNameILike = row.names(feature_imp2), feature_imp2)
+colnames(feature_df2) <- c("feature", "importance")
+
+# identify and remove 0 importance features
+least_imp2 <- feature_df2 %>%
+  filter(importance == 0) %>%
+  select(feature) 
+
+roc_obj <- pROC::roc(test$hospital_death, prediction_both)
+pROC::auc(roc_obj)
+pROC::coords(roc_obj, "best", "threshold")
+```
+
+prepare cat pool for ROSE sampling dataset
+```{r}
+# parameters tuning
+fit_params3 <- list(task_type="GPU",
+                   loss_function = "Logloss",
+                   iterations = 150,
+                   learning_rate = 0.04,
+                   random_seed = 101,
+                   l2_leaf_reg = 3,
+                   bagging_temperature = 6, 
+                   #sampling_frequency = "PerTree",
+                   #ignored_features = c(4,9),
+                   border_count = 32,
+                   depth = 3,
+                   leaf_estimation_method = "Newton",
+                   feature_border_type = "MinEntropy",
+                   thread_count = 500,
+                   logging_level = 'Silent',
+                   train_dir = path,
+                   od_type = "Iter")
+
+# split train and test sets
+train_rose_pool <- catboost.load_pool(data=train_rose[,-target], label = train_rose[,target])
+model_rose<- catboost.train(train_rose_pool, test_pool, fit_params3)
+prediction_rose <- catboost.predict(model_rose, test_pool, prediction_type = 'Probability')
+
+# test set confusion matrix
+test_matrix_rose <- catboost.predict(model_rose, test_pool, prediction_type = 'Class')
+table(test[,target], test_matrix_rose)
+
+# train set confusion matrix
+train_matrix_rose <- catboost.predict(model_rose, train_rose_pool, prediction_type = 'Class')
+table(train_rose[,target],train_matrix_rose)
+
+# compute accuracy
+accuracy_rose <- calc_accuracy(prediction_rose, test[,target], 0.448931)
+cat("\nAccuracy: ", accuracy_both, "\n")
+
+# feature importance
+feature_imp3 <- catboost.get_feature_importance(model_rose, train_rose_pool)
+feature_df3 <- data.frame(columnNameILike = row.names(feature_imp3), feature_imp3)
+colnames(feature_df3) <- c("feature", "importance")
+
+# identify and remove 0 importance features
+least_imp3 <- feature_df3 %>%
+  filter(importance == 0) %>%
+  select(feature) 
+
+roc_obj <- pROC::roc(test$hospital_death, prediction_rose)
+pROC::auc(roc_obj)
+pROC::coords(roc_obj, "best", "threshold")
+```
+
+feature importance plot
+```{r warning=FALSE}
+feature_df %>%
+  arrange(importance) %>%
+  top_n(importance, 15) %>%
+  ggplot(aes(x = reorder(feature, -importance), y = importance)) + 
+  geom_col() +
+  labs(title = "Top 15 Important Features",
+       subtitle = "Over Sampling dataset",
+       x = "Features",
+       y = "Index") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90))
+
+feature_df1 %>%
+  arrange(importance) %>%
+  top_n(importance, 15) %>%
+  ggplot(aes(x = reorder(feature, -importance), y = importance)) + 
+  geom_col() +
+  labs(title = "Top 15 Important Features",
+       subtitle = "Under Sampling dataset",
+       x = "Features",
+       y = "Index") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90))
+
+feature_df2 %>%
+  arrange(importance) %>%
+  top_n(importance, 15) %>%
+  ggplot(aes(x = reorder(feature, -importance), y = importance)) + 
+  geom_col() +
+  labs(title = "Top 15 Important Features",
+       subtitle = "Over and Under Sampling dataset",
+       x = "Features",
+       y = "Index") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90))
+
+feature_df3 %>%
+  arrange(importance) %>%
+  top_n(importance, 15) %>%
+  ggplot(aes(x = reorder(feature, -importance), y = importance)) + 
+  geom_col() +
+  labs(title = "Top 15 Important Features",
+       subtitle = "ROSE Sampling dataset",
+       x = "Features",
+       y = "Index") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90))
+```
+
+features with 0 importance
+```{r}
+least_imp
+least_imp1 
+least_imp2 
+least_imp3 
+```
+
+for original train dataset (imbalanced)
+```{r}
+# split train and test sets
+train_imb_pool <- catboost.load_pool(data=train0[,-target], label = train0[,target])
+model_imb<- catboost.train(train_imb_pool, test_pool, fit_params)
+prediction_imb <- catboost.predict(model_imb, test_pool, prediction_type = 'Probability')
+
+# test set confusion matrix
+test_matrix_imb <- catboost.predict(model_imb, test_pool, prediction_type = 'Class')
+table(test[,target], test_matrix_imb)
+
+# train set confusion matrix
+train_matrix_imb <- catboost.predict(model_imb, train_imb_pool, prediction_type = 'Class')
+table(train0[,target],train_matrix_imb)
+
+# compute accuracy
+accuracy_imb <- calc_accuracy(prediction_imb, test[,target])
+cat("\nAccuracy: ", accuracy_both, "\n")
+```
